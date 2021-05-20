@@ -100,6 +100,8 @@ export default class Request extends Body {
 		this.compress = init.compress === undefined ? (input.compress === undefined ? true : input.compress) : init.compress;
 		this.counter = init.counter || input.counter || 0;
 		this.agent = init.agent || input.agent;
+		this.cert = init.cert || input.cert;
+		this.key = init.key || input.key;
 		this.highWaterMark = init.highWaterMark || input.highWaterMark || 16384;
 		this.insecureHTTPParser = init.insecureHTTPParser || input.insecureHTTPParser || false;
 	}
@@ -218,7 +220,9 @@ export const getNodeRequestOptions = request => {
 		method: request.method,
 		headers: headers[Symbol.for('nodejs.util.inspect.custom')](),
 		insecureHTTPParser: request.insecureHTTPParser,
-		agent
+		agent,
+		...(request.cert && { cert: request.cert }),
+		...(request.key && { key: request.key })
 	};
 
 	return requestOptions;
