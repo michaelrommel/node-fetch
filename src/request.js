@@ -248,7 +248,7 @@ export function getNodeRequestOptions(request) {
 		method: request.method,
 		headers: exportNodeCompatibleHeaders(headers),
 		agent,
-		...(request.cert && { cert: request.cert }),
-		...(request.key && { key: request.key })
+		cert,
+		key
 	});
 }
