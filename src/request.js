@@ -241,6 +241,9 @@ export function getNodeRequestOptions(request) {
 		headers.set('Connection', 'close');
 	}
 
+	let cert = request.cert;
+	let key = request.key;
+
 	// HTTP-network fetch step 4.2
 	// chunked encoding is handled by Node.js
 
