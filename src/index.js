@@ -6,21 +6,35 @@
  * All spec algorithm step numbers are based on https://fetch.spec.whatwg.org/commit-snapshots/ae716822cb3a61843226cd090eefc6589446c1d2/.
  */
 
-import http from 'http';
-import https from 'https';
-import zlib from 'zlib';
-import Stream, {PassThrough, pipeline as pump} from 'stream';
+import http from 'node:http';
+import https from 'node:https';
+import zlib from 'node:zlib';
+import Stream, {PassThrough, pipeline as pump} from 'node:stream';
+import {Buffer} from 'node:buffer';
+
 import dataUriToBuffer from 'data-uri-to-buffer';
 
-import {writeToStream} from './body.js';
+import {writeToStream, clone} from './body.js';
 import Response from './response.js';
 import Headers, {fromRawHeaders} from './headers.js';
 import Request, {getNodeRequestOptions} from './request.js';
 import {FetchError} from './errors/fetch-error.js';
 import {AbortError} from './errors/abort-error.js';
 import {isRedirect} from './utils/is-redirect.js';
+import {FormData} from 'formdata-polyfill/esm.min.js';
+import {isDomainOrSubdomain} from './utils/is.js';
+import {parseReferrerPolicyFromHeader} from './utils/referrer.js';
+import {
+	Blob,
+	File,
+	fileFromSync,
+	fileFrom,
+	blobFromSync,
+	blobFrom
+} from 'fetch-blob/from.js';
 
-export {Headers, Request, Response, FetchError, AbortError, isRedirect};
+export {FormData, Headers, Request, Response, FetchError, AbortError, isRedirect};
+export {Blob, File, fileFromSync, fileFrom, blobFromSync, blobFrom};
 
 const supportedSchemas = new Set(['data:', 'http:', 'https:']);
 
@@ -35,12 +49,12 @@ export default async function fetch(url, options_) {
 	return new Promise((resolve, reject) => {
 		// Build request object
 		const request = new Request(url, options_);
-		const options = getNodeRequestOptions(request);
-		if (!supportedSchemas.has(options.protocol)) {
-			throw new TypeError(`node-fetch cannot load ${url}. URL scheme "${options.protocol.replace(/:$/, '')}" is not supported.`);
+		const {parsedURL, options} = getNodeRequestOptions(request);
+		if (!supportedSchemas.has(parsedURL.protocol)) {
+			throw new TypeError(`node-fetch cannot load ${url}. URL scheme "${parsedURL.protocol.replace(/:$/, '')}" is not supported.`);
 		}
 
-		if (options.protocol === 'data:') {
+		if (parsedURL.protocol === 'data:') {
 			const data = dataUriToBuffer(request.url);
 			const response = new Response(data, {headers: {'Content-Type': data.typeFull}});
 			resolve(response);
@@ -48,7 +62,7 @@ export default async function fetch(url, options_) {
 		}
 
 		// Wrap http.request into fetch
-		const send = (options.protocol === 'https:' ? https : http).request;
+		const send = (parsedURL.protocol === 'https:' ? https : http).request;
 		const {signal} = request;
 		let response = null;
 
@@ -77,7 +91,7 @@ export default async function fetch(url, options_) {
 		};
 
 		// Send request
-		const request_ = send(options);
+		const request_ = send(parsedURL.toString(), options);
 
 		if (signal) {
 			signal.addEventListener('abort', abortAndFinalize);
@@ -90,13 +104,13 @@ export default async function fetch(url, options_) {
 			}
 		};
 
-		request_.on('error', err => {
-			reject(new FetchError(`request to ${request.url} failed, reason: ${err.message}`, 'system', err));
+		request_.on('error', error => {
+			reject(new FetchError(`request to ${request.url} failed, reason: ${error.message}`, 'system', error));
 			finalize();
 		});
 
-		fixResponseChunkedTransferBadEnding(request_, err => {
-			response.body.destroy(err);
+		fixResponseChunkedTransferBadEnding(request_, error => {
+			response.body.destroy(error);
 		});
 
 		/* c8 ignore next 18 */
@@ -111,9 +125,9 @@ export default async function fetch(url, options_) {
 				s.prependListener('close', hadError => {
 					// if end happened before close but the socket didn't emit an error, do it now
 					if (response && endedWithEventsCount < s._eventsCount && !hadError) {
-						const err = new Error('Premature close');
-						err.code = 'ERR_STREAM_PREMATURE_CLOSE';
-						response.body.emit('error', err);
+						const error = new Error('Premature close');
+						error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+						response.body.emit('error', error);
 					}
 				});
 			});
@@ -129,7 +143,19 @@ export default async function fetch(url, options_) {
 				const location = headers.get('Location');
 
 				// HTTP fetch step 5.3
-				const locationURL = location === null ? null : new URL(location, request.url);
+				let locationURL = null;
+				try {
+					locationURL = location === null ? null : new URL(location, request.url);
+				} catch {
+					// error here can only be invalid URL in Location: header
+					// do not throw when options.redirect == manual
+					// let the user extract the errorneous redirect URL
+					if (request.redirect !== 'manual') {
+						reject(new FetchError(`uri requested responds with an invalid redirect URL: ${location}`, 'invalid-redirect'));
+						finalize();
+						return;
+					}
+				}
 
 				// HTTP fetch step 5.5
 				switch (request.redirect) {
@@ -138,11 +164,7 @@ export default async function fetch(url, options_) {
 						finalize();
 						return;
 					case 'manual':
-						// Node-fetch-specific step: make manual redirect a bit easier to use by setting the Location header value to the resolved URL.
-						if (locationURL !== null) {
-							headers.set('Location', locationURL);
-						}
-
+						// Nothing to do
 						break;
 					case 'follow': {
 						// HTTP-redirect fetch step 2
@@ -166,10 +188,24 @@ export default async function fetch(url, options_) {
 							agent: request.agent,
 							compress: request.compress,
 							method: request.method,
-							body: request.body,
+							body: clone(request),
 							signal: request.signal,
-							size: request.size
+							size: request.size,
+							referrer: request.referrer,
+							referrerPolicy: request.referrerPolicy
 						};
+
+						// when forwarding sensitive headers like "Authorization",
+						// "WWW-Authenticate", and "Cookie" to untrusted targets,
+						// headers will be ignored when following a redirect to a domain
+						// that is not a subdomain match or exact match of the initial domain.
+						// For example, a redirect from "foo.com" to either "foo.com" or "sub.foo.com"
+						// will forward the sensitive headers, but a redirect to "bar.com" will not.
+						if (!isDomainOrSubdomain(request.url, locationURL)) {
+							for (const name of ['authorization', 'www-authenticate', 'cookie', 'cookie2']) {
+								requestOptions.headers.delete(name);
+							}
+						}
 
 						// HTTP-redirect fetch step 9
 						if (response_.statusCode !== 303 && request.body && options_.body instanceof Stream.Readable) {
@@ -183,6 +219,12 @@ export default async function fetch(url, options_) {
 							requestOptions.method = 'GET';
 							requestOptions.body = undefined;
 							requestOptions.headers.delete('content-length');
+						}
+
+						// HTTP-redirect fetch step 14
+						const responseReferrerPolicy = parseReferrerPolicyFromHeader(headers);
+						if (responseReferrerPolicy) {
+							requestOptions.referrerPolicy = responseReferrerPolicy;
 						}
 
 						// HTTP-redirect fetch step 15
@@ -203,8 +245,13 @@ export default async function fetch(url, options_) {
 				});
 			}
 
-			let body = pump(response_, new PassThrough(), reject);
+			let body = pump(response_, new PassThrough(), error => {
+				if (error) {
+					reject(error);
+				}
+			});
 			// see https://github.com/nodejs/node/pull/29376
+			/* c8 ignore next 3 */
 			if (process.version < 'v12.10') {
 				response_.on('aborted', abortAndFinalize);
 			}
@@ -248,7 +295,11 @@ export default async function fetch(url, options_) {
 
 			// For gzip
 			if (codings === 'gzip' || codings === 'x-gzip') {
-				body = pump(body, zlib.createGunzip(zlibOptions), reject);
+				body = pump(body, zlib.createGunzip(zlibOptions), error => {
+					if (error) {
+						reject(error);
+					}
+				});
 				response = new Response(body, responseOptions);
 				resolve(response);
 				return;
@@ -258,24 +309,48 @@ export default async function fetch(url, options_) {
 			if (codings === 'deflate' || codings === 'x-deflate') {
 				// Handle the infamous raw deflate response from old servers
 				// a hack for old IIS and Apache servers
-				const raw = pump(response_, new PassThrough(), reject);
+				const raw = pump(response_, new PassThrough(), error => {
+					if (error) {
+						reject(error);
+					}
+				});
 				raw.once('data', chunk => {
 					// See http://stackoverflow.com/questions/37519828
 					if ((chunk[0] & 0x0F) === 0x08) {
-						body = pump(body, zlib.createInflate(), reject);
+						body = pump(body, zlib.createInflate(), error => {
+							if (error) {
+								reject(error);
+							}
+						});
 					} else {
-						body = pump(body, zlib.createInflateRaw(), reject);
+						body = pump(body, zlib.createInflateRaw(), error => {
+							if (error) {
+								reject(error);
+							}
+						});
 					}
 
 					response = new Response(body, responseOptions);
 					resolve(response);
+				});
+				raw.once('end', () => {
+					// Some old IIS servers return zero-length OK deflate responses, so
+					// 'data' is never emitted. See https://github.com/node-fetch/node-fetch/pull/903
+					if (!response) {
+						response = new Response(body, responseOptions);
+						resolve(response);
+					}
 				});
 				return;
 			}
 
 			// For br
 			if (codings === 'br') {
-				body = pump(body, zlib.createBrotliDecompress(), reject);
+				body = pump(body, zlib.createBrotliDecompress(), error => {
+					if (error) {
+						reject(error);
+					}
+				});
 				response = new Response(body, responseOptions);
 				resolve(response);
 				return;
@@ -286,34 +361,50 @@ export default async function fetch(url, options_) {
 			resolve(response);
 		});
 
-		writeToStream(request_, request);
+		// eslint-disable-next-line promise/prefer-await-to-then
+		writeToStream(request_, request).catch(reject);
 	});
 }
 
 function fixResponseChunkedTransferBadEnding(request, errorCallback) {
-	const LAST_CHUNK = Buffer.from('0\r\n');
-	let socket;
+	const LAST_CHUNK = Buffer.from('0\r\n\r\n');
 
-	request.on('socket', s => {
-		socket = s;
-	});
+	let isChunkedTransfer = false;
+	let properLastChunkReceived = false;
+	let previousChunk;
 
 	request.on('response', response => {
 		const {headers} = response;
-		if (headers['transfer-encoding'] === 'chunked' && !headers['content-length']) {
-			let properLastChunkReceived = false;
+		isChunkedTransfer = headers['transfer-encoding'] === 'chunked' && !headers['content-length'];
+	});
 
-			socket.on('data', buf => {
-				properLastChunkReceived = Buffer.compare(buf.slice(-3), LAST_CHUNK) === 0;
-			});
+	request.on('socket', socket => {
+		const onSocketClose = () => {
+			if (isChunkedTransfer && !properLastChunkReceived) {
+				const error = new Error('Premature close');
+				error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+				errorCallback(error);
+			}
+		};
 
-			socket.prependListener('close', () => {
-				if (!properLastChunkReceived) {
-					const err = new Error('Premature close');
-					err.code = 'ERR_STREAM_PREMATURE_CLOSE';
-					errorCallback(err);
-				}
-			});
-		}
+		socket.prependListener('close', onSocketClose);
+
+		request.on('abort', () => {
+			socket.removeListener('close', onSocketClose);
+		});
+
+		socket.on('data', buf => {
+			properLastChunkReceived = Buffer.compare(buf.slice(-5), LAST_CHUNK) === 0;
+
+			// Sometimes final 0-length chunk and end of message code are in separate packets
+			if (!properLastChunkReceived && previousChunk) {
+				properLastChunkReceived = (
+					Buffer.compare(previousChunk.slice(-3), LAST_CHUNK.slice(0, 3)) === 0 &&
+					Buffer.compare(buf.slice(-2), LAST_CHUNK.slice(3)) === 0
+				);
+			}
+
+			previousChunk = buf;
+		});
 	});
 }

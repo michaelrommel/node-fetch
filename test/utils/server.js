@@ -1,10 +1,10 @@
-import http from 'http';
-import zlib from 'zlib';
-import Busboy from 'busboy';
-import {once} from 'events';
+import http from 'node:http';
+import zlib from 'node:zlib';
+import {once} from 'node:events';
+import busboy from 'busboy';
 
 export default class TestServer {
-	constructor() {
+	constructor(hostname) {
 		this.server = http.createServer(this.router);
 		// Node 8 default keepalive timeout is 5000ms
 		// make it shorter here as we want to close server quickly at the end of tests
@@ -15,10 +15,18 @@ export default class TestServer {
 		this.server.on('connection', socket => {
 			socket.setTimeout(1500);
 		});
+		this.hostname = hostname || 'localhost';
 	}
 
 	async start() {
-		this.server.listen(0, 'localhost');
+		let host = this.hostname;
+		if (host.startsWith('[')) {
+			// If we're trying to listen on an IPv6 literal hostname, strip the
+			// square brackets before binding to the IPv6 address
+			host = host.slice(1, -1);
+		}
+
+		this.server.listen(0, host);
 		return once(this.server, 'listening');
 	}
 
@@ -29,10 +37,6 @@ export default class TestServer {
 
 	get port() {
 		return this.server.address().port;
-	}
-
-	get hostname() {
-		return 'localhost';
 	}
 
 	mockResponse(responseHandler) {
@@ -175,6 +179,13 @@ export default class TestServer {
 			});
 		}
 
+		if (p === '/empty/deflate') {
+			res.statusCode = 200;
+			res.setHeader('Content-Type', 'text/plain');
+			res.setHeader('Content-Encoding', 'deflate');
+			res.end();
+		}
+
 		if (p === '/sdch') {
 			res.statusCode = 200;
 			res.setHeader('Content-Type', 'text/plain');
@@ -232,6 +243,24 @@ export default class TestServer {
 		if (p === '/redirect/301') {
 			res.statusCode = 301;
 			res.setHeader('Location', '/inspect');
+			res.end();
+		}
+
+		if (p === '/redirect/301/invalid') {
+			res.statusCode = 301;
+			res.setHeader('Location', '//super:invalid:url%/');
+			res.end();
+		}
+
+		if (p.startsWith('/redirect-to/3')) {
+			res.statusCode = p.slice(13, 16);
+			res.setHeader('Location', p.slice(17));
+			res.end();
+		}
+
+		if (p === '/redirect/301/otherhost') {
+			res.statusCode = 301;
+			res.setHeader('Location', 'https://github.com/node-fetch');
 			res.end();
 		}
 
@@ -293,8 +322,30 @@ export default class TestServer {
 		}
 
 		if (p === '/redirect/bad-location') {
-			res.socket.write('HTTP/1.1 301\r\nLocation: ☃\r\nContent-Length: 0\r\n');
+			res.socket.write('HTTP/1.1 301\r\nLocation: <>\r\nContent-Length: 0\r\n');
 			res.socket.end('\r\n');
+		}
+
+		if (p === '/redirect/referrer-policy') {
+			res.statusCode = 301;
+			res.setHeader('Location', '/inspect');
+			res.setHeader('Referrer-Policy', 'foo unsafe-url bar');
+			res.end();
+		}
+
+		if (p === '/redirect/referrer-policy/same-origin') {
+			res.statusCode = 301;
+			res.setHeader('Location', '/inspect');
+			res.setHeader('Referrer-Policy', 'foo unsafe-url same-origin bar');
+			res.end();
+		}
+
+		if (p === '/redirect/chunked') {
+			res.writeHead(301, {
+				Location: '/inspect',
+				'Transfer-Encoding': 'chunked'
+			});
+			setTimeout(() => res.end(), 10);
 		}
 
 		if (p === '/error/400') {
@@ -342,6 +393,24 @@ export default class TestServer {
 			setTimeout(() => {
 				res.destroy();
 			}, 400);
+		}
+
+		if (p === '/chunked/split-ending') {
+			res.socket.write('HTTP/1.1 200\r\nTransfer-Encoding: chunked\r\n\r\n');
+			res.socket.write('3\r\nfoo\r\n3\r\nbar\r\n');
+
+			setTimeout(() => {
+				res.socket.write('0\r\n');
+			}, 10);
+
+			setTimeout(() => {
+				res.socket.end('\r\n');
+			}, 20);
+		}
+
+		if (p === '/chunked/multiple-ending') {
+			res.socket.write('HTTP/1.1 200\r\nTransfer-Encoding: chunked\r\n\r\n');
+			res.socket.write('3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n');
 		}
 
 		if (p === '/error/json') {
@@ -396,21 +465,20 @@ export default class TestServer {
 		}
 
 		if (p === '/multipart') {
+			let body = '';
 			res.statusCode = 200;
 			res.setHeader('Content-Type', 'application/json');
-			const busboy = new Busboy({headers: request.headers});
-			let body = '';
-			busboy.on('file', async (fieldName, file, fileName) => {
-				body += `${fieldName}=${fileName}`;
+			const bb = busboy({headers: request.headers});
+			bb.on('file', async (fieldName, file, info) => {
+				body += `${fieldName}=${info.filename}`;
 				// consume file data
 				// eslint-disable-next-line no-empty, no-unused-vars
-				for await (const c of file) { }
+				for await (const c of file) {}
 			});
-
-			busboy.on('field', (fieldName, value) => {
+			bb.on('field', (fieldName, value) => {
 				body += `${fieldName}=${value}`;
 			});
-			busboy.on('finish', () => {
+			bb.on('close', () => {
 				res.end(JSON.stringify({
 					method: request.method,
 					url: request.url,
@@ -418,7 +486,7 @@ export default class TestServer {
 					body
 				}));
 			});
-			request.pipe(busboy);
+			request.pipe(bb);
 		}
 
 		if (p === '/m%C3%B6bius') {

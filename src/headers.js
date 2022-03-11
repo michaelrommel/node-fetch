@@ -4,26 +4,28 @@
  * Headers class offers convenient helpers
  */
 
-import {types} from 'util';
-import http from 'http';
+import {types} from 'node:util';
+import http from 'node:http';
 
+/* c8 ignore next 9 */
 const validateHeaderName = typeof http.validateHeaderName === 'function' ?
 	http.validateHeaderName :
 	name => {
 		if (!/^[\^`\-\w!#$%&'*+.|~]+$/.test(name)) {
-			const err = new TypeError(`Header name must be a valid HTTP token [${name}]`);
-			Object.defineProperty(err, 'code', {value: 'ERR_INVALID_HTTP_TOKEN'});
-			throw err;
+			const error = new TypeError(`Header name must be a valid HTTP token [${name}]`);
+			Object.defineProperty(error, 'code', {value: 'ERR_INVALID_HTTP_TOKEN'});
+			throw error;
 		}
 	};
 
+/* c8 ignore next 9 */
 const validateHeaderValue = typeof http.validateHeaderValue === 'function' ?
 	http.validateHeaderValue :
 	(name, value) => {
 		if (/[^\t\u0020-\u007E\u0080-\u00FF]/.test(value)) {
-			const err = new TypeError(`Invalid character in header content ["${name}"]`);
-			Object.defineProperty(err, 'code', {value: 'ERR_INVALID_CHAR'});
-			throw err;
+			const error = new TypeError(`Invalid character in header content ["${name}"]`);
+			Object.defineProperty(error, 'code', {value: 'ERR_INVALID_CHAR'});
+			throw error;
 		}
 	};
 
@@ -141,8 +143,8 @@ export default class Headers extends URLSearchParams {
 						return Reflect.get(target, p, receiver);
 				}
 			}
-			/* c8 ignore next */
 		});
+		/* c8 ignore next */
 	}
 
 	get [Symbol.toStringTag]() {

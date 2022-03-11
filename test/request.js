@@ -1,15 +1,13 @@
-
-import stream from 'stream';
-import http from 'http';
-import {TextEncoder} from 'util';
+import stream from 'node:stream';
+import http from 'node:http';
 
 import AbortController from 'abort-controller';
 import chai from 'chai';
 import FormData from 'form-data';
 import Blob from 'fetch-blob';
 
-import TestServer from './utils/server.js';
 import {Request} from '../src/index.js';
+import TestServer from './utils/server.js';
 
 const {expect} = chai;
 
@@ -125,6 +123,15 @@ describe('Request', () => {
 			.to.throw(TypeError);
 		expect(() => new Request(base, {body: 'a', method: 'head'}))
 			.to.throw(TypeError);
+		expect(() => new Request(new Request(base), {body: 'a'}))
+			.to.throw(TypeError);
+	});
+
+	it('should throw error when including credentials', () => {
+		expect(() => new Request('https://john:pass@github.com/'))
+			.to.throw(TypeError);
+		expect(() => new Request(new URL('https://john:pass@github.com/')))
+			.to.throw(TypeError);
 	});
 
 	it('should default to null as body', () => {
@@ -194,18 +201,17 @@ describe('Request', () => {
 		});
 	});
 
-	it('should support blob() method', () => {
+	it('should support blob() method', async () => {
 		const url = base;
 		const request = new Request(url, {
 			method: 'POST',
-			body: Buffer.from('a=1')
+			body: new TextEncoder().encode('a=1')
 		});
 		expect(request.url).to.equal(url);
-		return request.blob().then(result => {
-			expect(result).to.be.an.instanceOf(Blob);
-			expect(result.size).to.equal(3);
-			expect(result.type).to.equal('');
-		});
+		const blob = await request.blob();
+		expect(blob).to.be.an.instanceOf(Blob);
+		expect(blob.size).to.equal(3);
+		expect(blob.type).to.equal('');
 	});
 
 	it('should support clone() method', () => {
@@ -276,4 +282,16 @@ describe('Request', () => {
 			expect(result).to.equal('a=1');
 		});
 	});
+
+	it('should warn once when using .data (request)', () => new Promise(resolve => {
+		process.once('warning', evt => {
+			expect(evt.message).to.equal('.data is not a valid RequestInit property, use .body instead');
+			resolve();
+		});
+
+		// eslint-disable-next-line no-new
+		new Request(base, {
+			data: ''
+		});
+	}));
 });

@@ -1,7 +1,7 @@
-import util from 'util';
-import {Headers} from '../src/index.js';
+import {format} from 'node:util';
 import chai from 'chai';
 import chaiIterator from 'chai-iterator';
+import {Headers} from '../src/index.js';
 
 chai.use(chaiIterator);
 
@@ -42,9 +42,9 @@ describe('Headers', () => {
 		expect(headers).to.have.property('forEach');
 
 		const result = [];
-		headers.forEach((value, key) => {
+		for (const [key, value] of headers.entries()) {
 			result.push([key, value]);
-		});
+		}
 
 		expect(result).to.deep.equal([
 			['a', '1'],
@@ -160,7 +160,7 @@ describe('Headers', () => {
 	});
 
 	it('should ignore unsupported attributes while reading headers', () => {
-		const FakeHeader = function () { };
+		const FakeHeader = function () {};
 		// Prototypes are currently ignored
 		// This might change in the future: #181
 		FakeHeader.prototype.z = 'fake';
@@ -178,7 +178,6 @@ describe('Headers', () => {
 		res.j = Number.NaN;
 		res.k = true;
 		res.l = false;
-		res.m = Buffer.from('test');
 
 		const h1 = new Headers(res);
 		h1.set('n', [1, 2]);
@@ -198,7 +197,6 @@ describe('Headers', () => {
 		expect(h1Raw.j).to.include('NaN');
 		expect(h1Raw.k).to.include('true');
 		expect(h1Raw.l).to.include('false');
-		expect(h1Raw.m).to.include('test');
 		expect(h1Raw.n).to.include('1,2');
 		expect(h1Raw.n).to.include('3,4');
 
@@ -275,6 +273,6 @@ describe('Headers', () => {
 		]);
 
 		// eslint-disable-next-line quotes
-		expect(util.format(headers)).to.equal("{ a: [ '1', '3' ], b: '2', host: 'thehost' }");
+		expect(format(headers)).to.equal("{ a: [ '1', '3' ], b: '2', host: 'thehost' }");
 	});
 });

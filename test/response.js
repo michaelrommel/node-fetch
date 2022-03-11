@@ -1,9 +1,6 @@
-
-import * as stream from 'stream';
-import {TextEncoder} from 'util';
+import * as stream from 'node:stream';
 import chai from 'chai';
-import Blob from 'fetch-blob';
-import {Response} from '../src/index.js';
+import {Response, Blob} from '../src/index.js';
 import TestServer from './utils/server.js';
 
 const {expect} = chai;
@@ -123,7 +120,8 @@ describe('Response', () => {
 			},
 			url: base,
 			status: 346,
-			statusText: 'production'
+			statusText: 'production',
+			highWaterMark: 789
 		});
 		const cl = res.clone();
 		expect(cl.headers.get('a')).to.equal('1');
@@ -131,6 +129,7 @@ describe('Response', () => {
 		expect(cl.url).to.equal(base);
 		expect(cl.status).to.equal(346);
 		expect(cl.statusText).to.equal('production');
+		expect(cl.highWaterMark).to.equal(789);
 		expect(cl.ok).to.be.false;
 		// Clone body shouldn't be the same body
 		expect(cl.body).to.not.equal(body);
@@ -154,13 +153,6 @@ describe('Response', () => {
 		});
 	});
 
-	it('should support buffer as body', () => {
-		const res = new Response(Buffer.from('a=1'));
-		return res.text().then(result => {
-			expect(result).to.equal('a=1');
-		});
-	});
-
 	it('should support ArrayBuffer as body', () => {
 		const encoder = new TextEncoder();
 		const res = new Response(encoder.encode('a=1'));
@@ -169,7 +161,7 @@ describe('Response', () => {
 		});
 	});
 
-	it('should support blob as body', () => {
+	it('should support blob as body', async () => {
 		const res = new Response(new Blob(['a=1']));
 		return res.text().then(result => {
 			expect(result).to.equal('a=1');
@@ -209,6 +201,38 @@ describe('Response', () => {
 		expect(res.url).to.equal('');
 	});
 
+	it('should cast string to stream using res.body', () => {
+		const res = new Response('hi');
+		expect(res.body).to.be.an.instanceof(stream.Readable);
+	});
+
+	it('should cast typed array to stream using res.body', () => {
+		const res = new Response(Uint8Array.from([97]));
+		expect(res.body).to.be.an.instanceof(stream.Readable);
+	});
+
+	it('should cast blob to stream using res.body', () => {
+		const res = new Response(new Blob(['a']));
+		expect(res.body).to.be.an.instanceof(stream.Readable);
+	});
+
+	it('should not cast null to stream using res.body', () => {
+		const res = new Response(null);
+		expect(res.body).to.be.null;
+	});
+
+	it('should cast typed array to text using res.text()', async () => {
+		const res = new Response(Uint8Array.from([97]));
+		expect(await res.text()).to.equal('a');
+	});
+
+	it('should cast stream to text using res.text() in a roundabout way', async () => {
+		const {body} = new Response('a');
+		expect(body).to.be.an.instanceof(stream.Readable);
+		const res = new Response(body);
+		expect(await res.text()).to.equal('a');
+	});
+
 	it('should support error() static method', () => {
 		const res = Response.error();
 		expect(res).to.be.an.instanceof(Response);
@@ -216,4 +240,13 @@ describe('Response', () => {
 		expect(res.status).to.equal(0);
 		expect(res.statusText).to.equal('');
 	});
+
+	it('should warn once when using .data (response)', () => new Promise(resolve => {
+		process.once('warning', evt => {
+			expect(evt.message).to.equal('data doesn\'t exist, use json(), text(), arrayBuffer(), or body instead');
+			resolve();
+		});
+
+		new Response('a').data;
+	}));
 });
