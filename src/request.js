@@ -283,7 +283,7 @@ export const getNodeRequestOptions = request => {
 		headers.set('Accept-Encoding', 'gzip,deflate,br');
 	}
 
-	let {agent} = request;
+	let {agent, cert, key} = request;
 	if (typeof agent === 'function') {
 		agent = agent(parsedURL);
 	}
@@ -307,8 +307,8 @@ export const getNodeRequestOptions = request => {
 		headers: headers[Symbol.for('nodejs.util.inspect.custom')](),
 		insecureHTTPParser: request.insecureHTTPParser,
 		agent,
-		...(request.cert && { cert: request.cert }),
-		...(request.key && { key: request.key })
+		cert,
+		key
 	};
 
 	return {
